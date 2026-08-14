@@ -1168,3 +1168,65 @@ found; all 51 fixtures are genuine upstream parser gaps**, grouped into Gaps 15-
   `Allocate(Node<Allocate>)` variant added to `PackageBodyElement` (and ideally
   `PartDefBodyElement`) with a starter/dispatch arm reusing the existing `allocate` production,
   filed upstream against `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
+
+- Gap 52. `occurrence_definition_body_with_labels` (`src/parser/occurrence_body.rs:85-131`), the
+  shared body parser for `occurrence def`/`occurrence`-usage/`flow def`/`allocation def` bodies
+  (every construct sharing `OccurrenceBodyElement`), tries a hard-coded opaque-text capture
+  *before* the real typed `occurrence_body_element` productions on every member whose first token
+  is `ref`, `abstract`, `private`, `in`, or `connection` -- `DEFINITION_BODY_OPAQUE_STARTERS`
+  (line 63-64: `&[b"ref", b"abstract", b"private", b"in", b"connection"]`), consulted first in the
+  `alt` at lines 100-111 (`capture_opaque_member(input, DEFINITION_BODY_OPAQUE_STARTERS)` is tried
+  before `occurrence_body_element`). Found exhaustively auditing `unsupported_occurrence_definition_
+  member` (this pass, against `cb026cd`): confirmed via direct `sysml_v2_parser_next::
+  parse_for_editor_owned` probes (temporary `crates/sysml_resolution/examples/dump_occ_ast.rs`,
+  removed after use) that every one of these five prefixes shadows an otherwise-fully-working typed
+  production reachable a few lines further down the very same `alt` list in `occurrence_body_
+  element` (`src/parser/occurrence_body.rs:540-606`): `private attribute x: Natural;` parses fine
+  into a typed `AttributeUsage` via `attribute_usage` when `private` is removed (confirmed against
+  `part def`'s body, which has no such opaque intercept and lowers correctly today), but with
+  `private` present the whole statement -- header, value expression, and any nested body -- is
+  captured verbatim as `OccurrenceBodyElement::Other(String)`, an inert raw-text fallback with no
+  name/typing/value fields for `sysml_resolution` to lower no matter what. Same result for `ref
+  payload :>> A::payload;` (shadows the keyword-less `:>>`-redefinition-binding production), `ref
+  action x = self;` and `ref part driver : Driver { ... }` (shadow `part_usage`/`individual_usage`),
+  `in event occurrence sourceEvent [1] default x;` (shadows `occurrence_usage`'s own `in`-direction
+  prefix handling -- `occurrence sourceEvent [1] default x;`, with `in` removed, parses fine into a
+  typed `OccurrenceUsage`), and `connection :HappensDuring connect a to b;` (there is no equivalent
+  typed connection-usage production reachable from `occurrence_body_element` at all, so this one
+  would need a new arm even after reordering, unlike the other four). This is the single largest
+  root cause of the 47-occurrence `unsupported_occurrence_definition_member` baseline for this
+  audit pass -- 24 of 47 (51%), confirmed against every occurrence in `test/snapshots/sysml.library/
+  flows.md` (9 of 12: the `ref`/`private`/`in`/`connection`-prefixed `MessageAction`/`Message`/
+  `SuccessionFlow` body members), `test/snapshots/sysml/examples/ahfsequences.md` (7 of 15: the
+  `ref part <name> = ... { ... }` nested-event-sequence blocks and one `in event occurrence mq;`
+  parameter), `test/snapshots/sysml/examples/occurrence_test.md` (1 of 1: `ref occurrence occ1 :
+  Occ;`), `test/snapshots/sysml/training/13_flow_definition_example.md` (1 of 1: `ref :>> payload :
+  Fuel;`), and one `ref part :>> <name>;` pair each in `27_interaction_example_1.md`,
+  `27_interaction_example_2.md`, and `27_message_payload_example.md`. Needs
+  `DEFINITION_BODY_OPAQUE_STARTERS`'s opaque capture reordered to run *after* (or removed in favor
+  of) `occurrence_body_element`'s own typed productions for `ref`/`abstract`/`private`/`in`
+  (mirroring how every other body-element grammar in this parser dispatches visibility/prefix
+  keywords through `visibility_prefix`/prefix-aware sub-parsers rather than opaque-capturing them),
+  plus a new typed connection-usage production reachable from `occurrence_body_element` for the
+  `connection` case, filed upstream against `feat/gh-119-arena-backed-references`
+  (elan8/sysml-v2-parser#121).
+
+- Gap 53. A standalone `ref payload [<mult>] { ... }` occurrence-body member (SysML v2 §8.2.2.16
+  `PayloadFeature` written as its own body member rather than as a `flow`/`message` usage's `of`
+  clause, e.g. `test/snapshots/sysml.library/flows.md:30`'s `abstract flow def MessageAction {
+  ref payload [0..*] { doc /* ... */ } }`) has no grammar production at all in `occurrence_body_
+  element` or anywhere else reachable from an occurrence-shaped body. Found exhaustively auditing
+  `unsupported_occurrence_definition_member` (this pass, against `cb026cd`): confirmed via direct
+  `sysml_v2_parser_next::parse_for_editor_owned` probe that even with Gap 52's opaque-`ref`-prefix
+  interception bypassed (testing the bare `payload [0..*] { doc /* x */ }` spelling directly, with
+  no leading `ref`), the statement still fails to parse into any typed node and falls to a parse
+  `Error` node -- `payload` is not registered as an `OCCURRENCE_BODY_STARTERS` keyword, and the
+  parser's own `payload_feature`/`PayloadFeature` production (`src/parser/flow.rs`) is reachable
+  only from `flow_usage_member`'s `of` clause, never as an independent body-member starter in its
+  own right. This is a distinct, narrower gap from Gap 52 (fixing the opaque-prefix ordering bug
+  would not resolve this one) -- confirmed the sole residual root cause for
+  `test/snapshots/sysml.library/flows.md`'s one remaining occurrence after Gap 52's other `flows.md`
+  occurrences and every `FlowUsage`/`SuccessionUsage` mechanical-wiring gap in this audit are fixed.
+  Needs `payload` added as an `OCCURRENCE_BODY_STARTERS` keyword with a new `OccurrenceBodyElement`
+  variant dispatching to the existing `payload_feature`/`PayloadFeature` production, filed upstream
+  against `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).

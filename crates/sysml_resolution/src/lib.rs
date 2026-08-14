@@ -486,6 +486,85 @@ mod tests {
         );
     }
 
+    /// A `message <name> of <Type> from <a> to <b>;` body element inside an `occurrence def`
+    /// body (BNF `OccurrenceBodyElement::FlowUsage`, `FlowUsageKind::Message`) must lower via
+    /// `lower_flow_usage`, not fall through to `unsupported_occurrence_definition_member` --
+    /// `lower_flow_usage`'s pre-existing `name.is_some()` deferral (see UPSTREAM_PARSER_GAPS.md
+    /// #47) is specifically scoped to the ambiguous bare `flow`/`succession flow` keywords, not
+    /// to `message`. Its `of <Type>` payload and `from`/`to` endpoints must resolve like any
+    /// other authored reference.
+    #[test]
+    fn named_message_usage_inside_occurrence_def_body_lowers_as_flow() {
+        let sexpr = semantic_sexpr_for(
+            "package P { item def Ping; occurrence def O { part a; part b; message ping of \
+             Ping from a to b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind flow)"),
+            "expected a flow declaration for the named message usage, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_occurrence_definition_member"),
+            "did not expect unsupported_occurrence_definition_member, got: {sexpr}"
+        );
+        assert!(
+            sexpr.contains("(kind flowPayloadType)")
+                && sexpr.contains("(kind flowSource)")
+                && sexpr.contains("(kind flowTarget)"),
+            "expected flowPayloadType/flowSource/flowTarget references, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("(status unresolved)"),
+            "expected the message's payload type and from/to endpoints to all resolve, got: {sexpr}"
+        );
+    }
+
+    /// The unambiguous anonymous `flow of <payload> from <a> to <b>;` shorthand (no declared
+    /// name -- the `of` clause is checked before the ambiguous name-dispatch branch that
+    /// misparses the bare `flow from <a> to <b>;` spelling's own `from` keyword as a name, see
+    /// UPSTREAM_PARSER_GAPS.md #47) must still lower via `lower_flow_usage`, unaffected by the
+    /// `FlowUsageKind::Message` widening above.
+    #[test]
+    fn anonymous_payload_first_flow_usage_still_lowers_without_a_name() {
+        let sexpr = semantic_sexpr_for(
+            "package P { item def Ping; occurrence def O { part a; part b; flow of Ping from \
+             a to b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind flow)"),
+            "expected a flow declaration for the anonymous flow usage, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_occurrence_definition_member"),
+            "did not expect unsupported_occurrence_definition_member, got: {sexpr}"
+        );
+    }
+
+    /// A standalone `succession first <a> then <b>;` body element inside an `occurrence def`
+    /// body (BNF `OccurrenceBodyElement::SuccessionUsage`, distinct from the action-body
+    /// `FirstStmt` and from `succession flow X to Y;`) must lower via `lower_succession_usage`,
+    /// not fall through to `unsupported_occurrence_definition_member`; both ends resolve as
+    /// `succession` references through the shared `lower_succession_end`.
+    #[test]
+    fn succession_usage_inside_occurrence_def_body_lowers_and_resolves_both_ends() {
+        let sexpr = semantic_sexpr_for(
+            "package P { occurrence def O { occurrence a; occurrence b; succession first a \
+             then b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind succession)"),
+            "expected a succession declaration, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_occurrence_definition_member"),
+            "did not expect unsupported_occurrence_definition_member, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("(status unresolved)"),
+            "expected both succession ends to resolve to their sibling declarations, got: {sexpr}"
+        );
+    }
+
     /// A `transition ... first X then Y;` body element's `source`/`target` operands must each
     /// resolve to their sibling state declarations, not fall through to
     /// `unsupported_state_definition_member`.

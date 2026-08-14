@@ -28,8 +28,8 @@ use sysml_v2_parser_next::{
         EndIdentity, EntryAction, EnumDef, EnumerationBody,
         EnumerationUsage as ParserEnumerationUsage, ExitAction, Expression, ExtendedDefinition,
         FeatureValue, FinalState, FirstMergeBody, FirstMergeBodyElement, FirstStmt, FlowDef,
-        FlowUsage, ForLoop, FrameMember, IfStmt, Import, ImportShape, InOut, InOutDecl,
-        IncludeUseCase, InterfaceDef, InterfaceDefBody, InterfaceDefBodyElement,
+        FlowUsage, FlowUsageKind, ForLoop, FrameMember, IfStmt, Import, ImportShape, InOut,
+        InOutDecl, IncludeUseCase, InterfaceDef, InterfaceDefBody, InterfaceDefBodyElement,
         InterfaceUsage as ParserInterfaceUsage, InterfaceUsageBodyElement, ItemDef,
         ItemUsage as ParserItemUsage, KermlBindingMember, KermlClassifierDecl, KermlConnectorEnd,
         KermlConnectorMember, KermlEndMember, KermlFeatureMember, KermlInvariantMember,
@@ -47,10 +47,10 @@ use sysml_v2_parser_next::{
         RequirementDefBody, RequirementDefBodyElement, RequirementUsage as ParserRequirementUsage,
         ReturnDecl, RootElement, Satisfy, SatisfyViewMember, SendPayload, Span, StakeholderMember,
         StateDef, StateDefBody, StateDefBodyElement, StateUsage as ParserStateUsage, SubjectDecl,
-        SubsettingKind, SubsettingRelationship, TerminateStmt, ThenAction, ThenStmt, ThenTarget,
-        Transition, TransitionAccept, TransitionEffect, TypedParameterMember, UnaryOperator,
-        UseCaseDef, UseCaseDefBody, UseCaseDefBodyElement, UseCaseUsage as ParserUseCaseUsage,
-        VariantTypedUsage, VariantUsage, VerificationCaseDef,
+        SubsettingKind, SubsettingRelationship, SuccessionUsage, TerminateStmt, ThenAction,
+        ThenStmt, ThenTarget, Transition, TransitionAccept, TransitionEffect, TypedParameterMember,
+        UnaryOperator, UseCaseDef, UseCaseDefBody, UseCaseDefBodyElement,
+        UseCaseUsage as ParserUseCaseUsage, VariantTypedUsage, VariantUsage, VerificationCaseDef,
         VerificationCaseUsage as ParserVerificationCaseUsage, VerifyRequirementMember, ViewBody,
         ViewBodyElement, ViewDef, ViewDefBody, ViewDefBodyElement, ViewUsage as ParserViewUsage,
         ViewpointDef, ViewpointUsage as ParserViewpointUsage, Visibility as ParserVisibility,
@@ -6760,13 +6760,23 @@ impl SemanticModelBuilder {
     /// <payload>` clause's type resolved as a `FlowPayloadType` reference (mirroring
     /// `AcceptPayloadType`). A `: Type` clause on the flow itself (`type_name`) is a structurally
     /// distinct declaration form already tracked as deferred (see UPSTREAM_PARSER_GAPS.md #28) and
-    /// stays unsupported. A *named* flow (`node.value.name.is_some()`) also stays unsupported even
-    /// though genuinely named flows (e.g. `flow generateToAmplify from a to b;`) parse and resolve
-    /// just as well as the anonymous form -- the parser cannot distinguish a real declared name
-    /// from the canonical `flow from <a> to <b>;` shorthand misparsing its own `from` keyword as
-    /// the name (see UPSTREAM_PARSER_GAPS.md #47), so treating every non-empty `name` as authored
-    /// risks silently synthesizing a spurious `from`-named declaration for the far more common
-    /// anonymous form; conservatively deferring the whole `name.is_some()` case avoids that.
+    /// stays unsupported. A *named* bare `flow`/`succession flow` (`node.value.name.is_some()`)
+    /// also stays unsupported even though genuinely named flows (e.g. `flow generateToAmplify from
+    /// a to b;`) parse and resolve just as well as the anonymous form -- the parser cannot
+    /// distinguish a real declared name from the canonical `flow from <a> to <b>;` shorthand
+    /// misparsing its own `from` keyword as the name (see UPSTREAM_PARSER_GAPS.md #47), so treating
+    /// every non-empty `name` as authored risks silently synthesizing a spurious `from`-named
+    /// declaration for the far more common anonymous form; conservatively deferring the whole
+    /// `name.is_some()` case avoids that for those two keywords. `FlowUsageKind::Message` is exempt
+    /// from that deferral and has its declared name lowered like any other named usage: every
+    /// `message <name> of <Type> (from <a> to <b>)?;` occurrence audited in the corpus (`Flows`
+    /// standard library, `sysml/examples/ahfsequences.md`, the interaction-example/sequence-
+    /// modeling training/validation fixtures) carries a genuine, non-`"from"` declared name, and
+    /// Gap 47's own misparse repro shows the ambiguity requires an *anonymous* `message from a to
+    /// b;` (no name, no `of` clause) to trigger -- a shape not observed anywhere in the tracked
+    /// corpus. This is a `kind`-based (typed-AST) distinction, not a spelling-based one; the
+    /// residual theoretical risk of a truly anonymous `message from a to b;` misparsing its `from`
+    /// keyword as a name is documented in UPSTREAM_PARSER_GAPS.md #47.
     fn lower_flow_usage(
         &mut self,
         document: DocumentId,
@@ -6774,19 +6784,37 @@ impl SemanticModelBuilder {
         family: UnsupportedFamily,
         node: &Node<FlowUsage>,
     ) -> Result<(), ConstructionError> {
-        if node.value.name.is_some() || node.value.type_name.is_some() {
+        let is_named_message =
+            node.value.name.is_some() && node.value.kind == FlowUsageKind::Message;
+        let name_deferred = node.value.name.is_some() && !is_named_message;
+        if name_deferred || node.value.type_name.is_some() {
             self.push_unsupported(document, family, node.span.clone());
             return Ok(());
         }
-        let (Some(from), Some(to)) = (&node.value.from, &node.value.to) else {
-            self.push_unsupported(document, family, node.span.clone());
-            return Ok(());
+        // The anonymous `flow`/`succession flow` shorthand (`name.is_none()`) is only ever
+        // meaningful with both endpoints present; a named `message` usage may legitimately declare
+        // just its type without wiring up `from`/`to` yet (e.g. `message setSpeedMessage of
+        // SetSpeed;`, `sysml/training/27_interaction_example_2.md`).
+        let endpoints = match (&node.value.from, &node.value.to) {
+            (Some(from), Some(to)) => Some((from, to)),
+            (None, None) if is_named_message => None,
+            _ => {
+                self.push_unsupported(document, family, node.span.clone());
+                return Ok(());
+            }
         };
+        let name = node
+            .value
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(|name| self.intern_name(name))
+            .transpose()?;
         let declaration = self.push_typed_declaration(
             document,
             Some(owner),
             DeclarationKind::Flow,
-            None,
+            name,
             node.span.clone(),
         )?;
         self.push_membership(
@@ -6815,14 +6843,22 @@ impl SemanticModelBuilder {
                 })?;
             }
         }
-        self.lower_satisfy_operand(
-            document,
-            declaration,
-            family,
-            ReferenceKind::FlowSource,
-            from,
-        )?;
-        self.lower_satisfy_operand(document, declaration, family, ReferenceKind::FlowTarget, to)?;
+        if let Some((from, to)) = endpoints {
+            self.lower_satisfy_operand(
+                document,
+                declaration,
+                family,
+                ReferenceKind::FlowSource,
+                from,
+            )?;
+            self.lower_satisfy_operand(
+                document,
+                declaration,
+                family,
+                ReferenceKind::FlowTarget,
+                to,
+            )?;
+        }
         Ok(())
     }
 
@@ -10802,10 +10838,14 @@ impl SemanticModelBuilder {
     /// `flow def` bodies (also `DefinitionBodyElement::OccurrenceMember`): recognized owned
     /// members are attribute/part/item/nested-occurrence usages plus `end` declarations (lowered
     /// as connector-end references through the same `lower_end_decl`/`ReferenceKind::ConnectorEnd`
-    /// machinery `connection def`/`interface def` use), plus `assert constraint` members
-    /// (`lower_assert_constraint_member`); everything else -- flow usages, succession usages,
-    /// `satisfy`, `allocate`, `exhibit` state usages -- falls through to
-    /// `unsupported_occurrence_definition_member`.
+    /// machinery `connection def`/`interface def` use), `assert constraint` members
+    /// (`lower_assert_constraint_member`), `satisfy`/`allocate` statements, standalone `flow`/
+    /// `message`/`succession flow` usages (`lower_flow_usage`), and standalone `succession`
+    /// usages (`lower_succession_usage`); everything else -- bare metadata annotations and the
+    /// opaque `Other` raw-text fallback (see UPSTREAM_PARSER_GAPS.md #52 -- `ref`/`abstract`/
+    /// `private`/`in`/`connection`-prefixed occurrence-body members are captured as opaque text
+    /// upstream before the typed productions that would otherwise parse them ever run) -- falls
+    /// through to `unsupported_occurrence_definition_member`.
     fn lower_occurrence_body_element(
         &mut self,
         document: DocumentId,
@@ -10857,15 +10897,80 @@ impl SemanticModelBuilder {
                 UnsupportedFamily::OccurrenceDefinitionMember,
                 node,
             )?,
-            OccurrenceBodyElement::Annotation(_)
-            | OccurrenceBodyElement::Other(_)
-            | OccurrenceBodyElement::FlowUsage(_)
-            | OccurrenceBodyElement::SuccessionUsage(_) => self.push_unsupported(
-                document,
-                UnsupportedFamily::OccurrenceDefinitionMember,
-                element.span.clone(),
-            ),
+            OccurrenceBodyElement::FlowUsage(node) => {
+                self.lower_flow_usage(
+                    document,
+                    owner,
+                    UnsupportedFamily::OccurrenceDefinitionMember,
+                    node,
+                )?;
+            }
+            OccurrenceBodyElement::SuccessionUsage(node) => {
+                self.lower_succession_usage(
+                    document,
+                    owner,
+                    UnsupportedFamily::OccurrenceDefinitionMember,
+                    node,
+                )?;
+            }
+            OccurrenceBodyElement::Annotation(_) | OccurrenceBodyElement::Other(_) => self
+                .push_unsupported(
+                    document,
+                    UnsupportedFamily::OccurrenceDefinitionMember,
+                    element.span.clone(),
+                ),
         }
+        Ok(())
+    }
+
+    /// Lowers a standalone `succession (multiplicity)? (first (multiplicity)? source)? then
+    /// (multiplicity)? target (;|{ })` body element (BNF `SuccessionUsage`, `ast::
+    /// SuccessionUsage`) found inside an occurrence def/usage body -- distinct from the
+    /// action-body `first ... then ...` control node (`FirstStmt`, lowered by
+    /// `lower_first_stmt`) and from `succession flow X to Y;` (a `FlowUsage` with `kind:
+    /// SuccessionFlow`, lowered by `lower_flow_usage`). Mirrors `lower_first_stmt`: an anonymous
+    /// `DeclarationKind::Succession` feature owned by `owner`, with `source`/`target` lowered as
+    /// authored `Succession` references through the shared `lower_succession_end`
+    /// `DeclarationDomain::Any` lexical lookup (so a dotted feature-chain end resolves via
+    /// `Expression::MemberAccess`/`FeatureChainRef`, exactly like `FirstStmt`'s own ends). The
+    /// succession usage's own optional `name`/`type_name`/`multiplicity` (BNF
+    /// `SuccessionAsUsage`'s `UsageDeclaration` prefix) and any braced body are out of scope, the
+    /// same deliberate limitation `lower_first_stmt` documents for its own `succession`-keyword
+    /// prefix.
+    fn lower_succession_usage(
+        &mut self,
+        document: DocumentId,
+        owner: DeclarationId,
+        family: UnsupportedFamily,
+        node: &Node<SuccessionUsage>,
+    ) -> Result<(), ConstructionError> {
+        let declaration = self.push_typed_declaration(
+            document,
+            Some(owner),
+            DeclarationKind::Succession,
+            None,
+            node.span.clone(),
+        )?;
+        self.push_membership(
+            declaration,
+            MembershipKind::Feature,
+            Visibility::Default,
+            node.span.clone(),
+        )?;
+        self.lower_succession_end(
+            document,
+            declaration,
+            family,
+            ReferenceKind::Succession,
+            &node.value.source,
+        )?;
+        self.lower_succession_end(
+            document,
+            declaration,
+            family,
+            ReferenceKind::Succession,
+            &node.value.target,
+        )?;
         Ok(())
     }
 
@@ -13955,6 +14060,16 @@ mod tests {
         );
     }
 
+    /// `succession first x then y;` used to be an example of a construct that stayed explicitly
+    /// unsupported here; it is now lowered by `lower_succession_usage` (see the
+    /// `sysml_resolution::tests` succession/flow occurrence-body tests). The genuinely still-open
+    /// gap in this scope is `occurrence_body.rs`'s `DEFINITION_BODY_OPAQUE_STARTERS` list
+    /// (UPSTREAM_PARSER_GAPS.md #52): a `ref`/`abstract`/`private`/`in`/`connection`-prefixed
+    /// occurrence-body member is captured as opaque raw text upstream *before* the typed
+    /// productions that would otherwise parse it (e.g. `attribute_usage`, `part_usage`) ever run,
+    /// so there is no typed AST for `sysml_resolution` to lower no matter what -- confirmed via a
+    /// direct `sysml_v2_parser_next::parse_for_editor_owned` probe against `ref part x;` inside an
+    /// `occurrence def` body.
     #[test]
     fn occurrence_definition_member_body_construct_stays_explicitly_unsupported() {
         let request = crate::BuildRequest::new(
@@ -13962,7 +14077,7 @@ mod tests {
                 "memory://test/enum.sysml",
                 "package Demo {\n\
                  \toccurrence def Occ {\n\
-                 \t\tsuccession first x then y;\n\
+                 \t\tref part x;\n\
                  \t}\n\
                  }\n"
                 .to_string(),
@@ -13980,7 +14095,7 @@ mod tests {
             .unwrap();
         assert!(
             output.contains("unsupported_occurrence_definition_member"),
-            "expected the succession usage to surface as an explicit unsupported diagnostic, got:\n{output}"
+            "expected the opaque `ref`-prefixed member to surface as an explicit unsupported diagnostic, got:\n{output}"
         );
     }
 
