@@ -858,6 +858,127 @@ mod tests {
         );
     }
 
+    /// A `Transition`'s typed `accept <name> : <Type>;` payload trigger (`TransitionAccept::
+    /// Payload`) previously fell through to `unsupported_state_definition_member`
+    /// unconditionally even though `lower_payload_clause_type`/`lower_satisfy_operand` already
+    /// resolve the identical shape for `ThenTarget::Accept` (`lower_then_accept`). Now mirrors
+    /// that arm exactly: the payload's `: Type` suffix resolves as `acceptPayloadType`, and its
+    /// trailing `via <port>` clause as `acceptVia`.
+    #[test]
+    fn transition_payload_accept_trigger_resolves_type_and_via() {
+        let sexpr = semantic_sexpr_for(
+            "package P { attribute def Sig; part def Receiver; state def S { ref p : \
+             Receiver; state a; state b; transition first a accept x : Sig via p then b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind acceptPayloadType)"),
+            "expected an acceptPayloadType reference for the `: Sig` suffix, got: {sexpr}"
+        );
+        assert!(
+            sexpr.contains("(kind acceptVia)"),
+            "expected an acceptVia reference for the `via p` clause, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_state_definition_member"),
+            "did not expect unsupported_state_definition_member, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("(status unresolved)"),
+            "expected both the payload type and via target to resolve, got: {sexpr}"
+        );
+    }
+
+    /// A transition's bare `do action D;` effect (`TransitionEffect::Perform` with no `: Type`
+    /// suffix) declares a new anonymous nested action usage named `D` (BNF
+    /// `PerformActionUsageDeclaration`'s `UsageDeclaration` form) rather than referencing an
+    /// existing one -- there is no `QualifiedReferenceId` to resolve, so this is a genuine no-op,
+    /// not an unsupported construct. Previously always flagged unsupported regardless (found
+    /// auditing `unsupported_state_definition_member`, e.g. `sysml/examples/state_test.md`'s
+    /// `accept s : Sig do action D then S2;`).
+    #[test]
+    fn transition_perform_effect_without_type_is_not_unsupported() {
+        let sexpr = semantic_sexpr_for(
+            "package P { state def S { state a; state b; transition first a do action D then \
+             b; } }",
+        );
+        assert!(
+            !sexpr.contains("unsupported_state_definition_member"),
+            "did not expect unsupported_state_definition_member for a bare `do action D;` \
+             effect, got: {sexpr}"
+        );
+    }
+
+    /// A transition's `do send <payload> [: Type] [via <port>] [to <target>];` effect
+    /// (`TransitionEffect::Send`) previously fell through to `unsupported_state_definition_member`
+    /// unconditionally even though it already carries a fully typed AST. Now mirrors
+    /// `lower_accept_send_clauses`'s own `send`/`via`/`to` handling: a typed bare-name payload's
+    /// `: Type` suffix resolves as `acceptPayloadType`, and `to` as `sendTarget`.
+    #[test]
+    fn transition_send_effect_with_typed_payload_resolves_type_and_target() {
+        let sexpr = semantic_sexpr_for(
+            "package P { attribute def Sig; part def Receiver; state def S { ref p : \
+             Receiver; state a; state b; transition first a do send msg : Sig to p then b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind acceptPayloadType)"),
+            "expected an acceptPayloadType reference for the `: Sig` suffix, got: {sexpr}"
+        );
+        assert!(
+            sexpr.contains("(kind sendTarget)"),
+            "expected a sendTarget reference for the `to p` clause, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_state_definition_member"),
+            "did not expect unsupported_state_definition_member, got: {sexpr}"
+        );
+    }
+
+    /// A transition's `do send new <Type>(...) to <target>;` effect resolves the payload's
+    /// constructor callee as an `invocationCallee` reference, reusing `lower_constraint_expression`
+    /// directly (the same dispatch `lower_accept_send_clauses`'s `SendPayload::Expression` arm and
+    /// a transition `guard` already use) -- not `lower_satisfy_operand`'s narrower reference-only
+    /// dispatch, which would wrongly flag the constructor as unsupported.
+    #[test]
+    fn transition_send_effect_constructor_payload_resolves_invocation_callee() {
+        let sexpr = semantic_sexpr_for(
+            "package P { attribute def Sig; part def Receiver; state def S { ref p : \
+             Receiver; state a; state b; transition first a do send new Sig() to p then b; } }",
+        );
+        assert!(
+            sexpr.contains("(kind invocationCallee)"),
+            "expected an invocationCallee reference for the `new Sig()` constructor, got: {sexpr}"
+        );
+        assert!(
+            sexpr.contains("(kind sendTarget)"),
+            "expected a sendTarget reference for the `to p` clause, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_state_definition_member"),
+            "did not expect unsupported_state_definition_member, got: {sexpr}"
+        );
+    }
+
+    /// A transition's `do assign <lhs> := <rhs>;` effect (`TransitionEffect::Assign`) resolves
+    /// both operands through `lower_constraint_expression`, so a dotted feature-chain `lhs` and an
+    /// arithmetic `rhs` (a shape `lower_satisfy_operand` cannot handle at all) both resolve without
+    /// falling through to `unsupported_state_definition_member`.
+    #[test]
+    fn transition_assign_effect_resolves_member_access_lhs_and_arithmetic_rhs() {
+        let sexpr = semantic_sexpr_for(
+            "package P { part def Counter { attribute count; } state def S { part counter : \
+             Counter; state a; state b; transition first a do assign counter.count := \
+             counter.count + 1 then b; } }",
+        );
+        assert!(
+            sexpr.matches("(kind memberAccessOperand)").count() >= 2,
+            "expected memberAccessOperand references for both `counter.count` occurrences, got: {sexpr}"
+        );
+        assert!(
+            !sexpr.contains("unsupported_state_definition_member"),
+            "did not expect unsupported_state_definition_member, got: {sexpr}"
+        );
+    }
+
     /// `RequirementDefBodyElement::VariantUsage` (a bare `variant <name>;` member inside a
     /// `requirement def`/usage body, e.g. inside a `variation`-flavored requirement choice) was
     /// unconditionally unsupported even though `lower_variant_usage` is already shared by

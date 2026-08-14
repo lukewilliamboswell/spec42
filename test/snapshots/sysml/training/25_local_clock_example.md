@@ -63,12 +63,6 @@ package 'Local Clock Example' {
       )
       (diagnostic
         (severity warning)
-        (code "unsupported_state_definition_member")
-        (source "semantic")
-        (range (start 21 3) (end 22 20))
-      )
-      (diagnostic
-        (severity warning)
         (code "unresolved_reference")
         (source "semantic")
         (range (start 23 17) (end 23 38))
@@ -80,7 +74,7 @@ package 'Local Clock Example' {
 # SMG
 ~~~sexpr
 (semantic-model
-  (publication (phase resolved) (completeness unsupported-syntax) (has-evaluation false) (source-digest "blake3:c87210a718fb52b6e4333f862eb8c447e5365a87e88fe8ce7597a09f5281e838") (contract-version "parser-owned-resolution-v1"))
+  (publication (phase resolved) (completeness complete) (has-evaluation false) (source-digest "blake3:c87210a718fb52b6e4333f862eb8c447e5365a87e88fe8ce7597a09f5281e838") (contract-version "parser-owned-resolution-v1"))
   (declarations
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example"))) (kind package) (membership (kind owning) (visibility default)))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind import) (ordinal 0))))) (kind import) (membership (kind import) (visibility private)) (authored (membership (kind import) (visibility private)) (relationships (membershipImport (reference "ScalarValues::String") (import (shape membership) (recursive false)))))
@@ -90,7 +84,7 @@ package 'Local Clock Example' {
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::ServerBehavior"))) (kind state) (membership (kind feature) (visibility default)))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind initial-state) (ordinal 0))))) (kind initial-state) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (initialState (reference "off"))))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 0))))) (kind transition) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (transitionTarget (reference "waiting")) (transitionTrigger (reference "Start"))))
-    (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind transition) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (transitionTarget (reference "responding"))))
+    (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind transition) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (transitionTarget (reference "responding")) (acceptVia (reference "requestPort")) (acceptPayloadType (reference "Request"))))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 2))))) (kind transition) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (expressionOperand (reference "today")) (transitionTarget (reference "off")) (invocationCallee (reference "Time::Iso8601DateTime"))))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 3))))) (kind transition) (membership (kind feature) (visibility default)) (authored (membership (kind feature) (visibility default)) (relationships (transitionTarget (reference "waiting"))))
     (declaration (id (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::ServerBehavior::off"))) (kind state) (membership (kind feature) (visibility default)))
@@ -131,6 +125,12 @@ package 'Local Clock Example' {
     (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 2))))) (kind invocationCallee) (ordinal 0))
       (authored-target "Time::Iso8601DateTime")
       (outcome (status unresolved)))
+    (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptVia) (ordinal 0))
+      (authored-target "requestPort")
+      (outcome (status resolved) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::requestPort")))))
+    (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptPayloadType) (ordinal 0))
+      (authored-target "Request")
+      (outcome (status resolved) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Request")))))
     (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::today"))) (kind featureTyping) (ordinal 0))
       (authored-target "String")
       (outcome (status unresolved)))
@@ -143,6 +143,8 @@ package 'Local Clock Example' {
     (relationship (kind transitionTarget) (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 2))))) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::ServerBehavior::off"))) (provenance authored) (authored-reference (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 2))))) (kind transitionTarget) (ordinal 0)))
     (relationship (kind transitionTarget) (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 3))))) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::ServerBehavior::waiting"))) (provenance authored) (authored-reference (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 3))))) (kind transitionTarget) (ordinal 0)))
     (relationship (kind transitionTrigger) (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 0))))) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Start"))) (provenance authored) (authored-reference (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 0))))) (kind transitionTrigger) (ordinal 0)))
+    (relationship (kind acceptVia) (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::requestPort"))) (provenance authored) (authored-reference (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptVia) (ordinal 0)))
+    (relationship (kind acceptPayloadType) (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Request"))) (provenance authored) (authored-reference (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptPayloadType) (ordinal 0)))
   )
   (evaluation
   )
@@ -190,6 +192,14 @@ package 'Local Clock Example' {
   (query (document "memory://snapshot/25_local_clock_example.md") (range (start 23 17) (end 23 38)) (probe (position 23 17))
     (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 2))))) (kind invocationCallee) (ordinal 0) (authored-target "Time::Iso8601DateTime")
       (outcome (status unresolved)))
+  )
+  (query (document "memory://snapshot/25_local_clock_example.md") (range (start 21 32) (end 21 43)) (probe (position 21 32))
+    (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptVia) (ordinal 0) (authored-target "requestPort")
+      (outcome (status resolved) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::requestPort")))))
+  )
+  (query (document "memory://snapshot/25_local_clock_example.md") (range (start 21 20) (end 21 27)) (probe (position 21 20))
+    (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (anonymous (kind transition) (ordinal 1))))) (kind acceptPayloadType) (ordinal 0) (authored-target "Request")
+      (outcome (status resolved) (target (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Request")))))
   )
   (query (document "memory://snapshot/25_local_clock_example.md") (range (start 9 20) (end 9 26)) (probe (position 9 20))
     (reference (id (source (node (document "memory://snapshot/25_local_clock_example.md") (qualified-name "Local Clock Example::Server::today"))) (kind featureTyping) (ordinal 0) (authored-target "String")

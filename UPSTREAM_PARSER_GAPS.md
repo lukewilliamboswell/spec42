@@ -632,6 +632,24 @@ entry should carry enough detail to file/update an upstream issue against
   fall through to un-dispatched); each needs new upstream AST variants/parser productions before
   `sysml_resolution` has anything to lower, filed upstream against
   `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
+  **Re-verified (exhaustive `unsupported_state_definition_member` audit, this pass, against the
+  same pinned `cb026cd` checkout):** `StateDefBodyElement` (`src/ast/behavior.rs:828-853`) is
+  unchanged since this gap was written -- still no `Action`/`Attribute`/`Constraint`/
+  `AssertConstraintMember`/`Succession` variant, confirmed against `sysml.library/states.md`'s and
+  `sysml/training/31_time_constraints.md`'s `attribute :>> ...;`/`action :>> ...;`/`succession
+  ...;`/`assert constraint {...}`/bare `constraint {...}` members (all fall to `Other`) and
+  `kerml/step_usage_in_body.md`'s KerML `step s;` generic-usage members (same missing-variant
+  pattern, one more manifestation: no `Step`/generic-`Usage` variant either). This gap's own
+  narrowness claim stands unmodified; what *has* changed since it was written is everything
+  `StateDefBodyElement` *does* already support (`InOutDecl`, `Ref`, `RequirementUsage`, `StateUsage`,
+  `Transition`, `Then`, `FinalState`, `Entry`/`Do`/`Exit`) -- all of which this pass confirmed are
+  fully wired on the `sysml_resolution` side (see `lower_transition`/`lower_transition_effect`'s new
+  `TransitionAccept::Payload`/`TransitionEffect::{Accept,Send,Assign}` coverage), so every remaining
+  `unsupported_state_definition_member` occurrence in the non-grammar-blocked corpus now traces to
+  either this gap, Gap 43, or the new Gap 54 below -- no further sibling-enum-parity mechanical
+  wiring gap remains for state bodies specifically (unlike, say, the flow/succession-into-occurrence-
+  body gap `f755bcd6` closed, `StateDefBodyElement` genuinely has no typed member for these shapes to
+  begin with, not merely an undispatched one).
 
 - Gap 43. `EntryAction`/`DoAction`/`ExitAction` (`src/ast/behavior.rs:858-889`) support only two
   shapes: a reference-path form (`entry action <path> ...;`, `action_reference:
@@ -1230,3 +1248,27 @@ found; all 51 fixtures are genuine upstream parser gaps**, grouped into Gaps 15-
   Needs `payload` added as an `OCCURRENCE_BODY_STARTERS` keyword with a new `OccurrenceBodyElement`
   variant dispatching to the existing `payload_feature`/`PayloadFeature` production, filed upstream
   against `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
+
+- Gap 54. `then_stmt`/`transition_tail`'s target-name parsing (`src/parser/state.rs:341-351`,
+  `:674-716`) has no optional `state` noise-keyword the way its sibling `final_stmt`
+  (`src/parser/state.rs:354-360`, `opt(preceded(ws1, tag("state")))`) does, so the spelling `then
+  state <name>;` -- pervasive in the real corpus alongside the keyword-less `then <name>;` form,
+  e.g. `test/snapshots/sysml/examples/assignment_test.md:29`'s `then state wait;` -- fails to parse
+  as any `StateDefBodyElement` variant and falls to whole-statement `Other`/error-recovery. Found
+  exhaustively auditing `unsupported_state_definition_member` (this pass, against `cb026cd`):
+  confirmed via a direct `sysml_v2_parser_next::parse_for_editor_owned` probe on the minimal
+  `state def S { state wait; then state wait; }` that `then_stmt_inner` calls
+  `crate::parser::lex::reference_path` immediately after the mandatory `then` + whitespace, with no
+  keyword-skip step, so it greedily consumes the bare identifier `state` as the entire
+  `state_reference` path, then expects `;` but finds ` wait;` instead and fails; `transition_tail`'s
+  own `then <target>;` clause (used by both `transition`/`transition_shorthand`) independently fails
+  the same way, since its `target = expression(input)` also has no `state`-skip and a bare `state`
+  identifier absorbs the whole `Expression::FeatureRef`, leaving `wait;` dangling before
+  `connect_body`. Both productions therefore fail, and the entire `then state wait;` statement (plus
+  trailing whitespace up to the next recognized starter) falls to the recovery-preview `Other`
+  fallback, not a mechanical `sysml_resolution`-side dispatch gap (there is no already-typed node
+  this falls through to un-dispatched -- the target is still an ordinary bare/qualified name once
+  parsed, identical in shape to a keyword-less `then <name>;`). Needs an optional `state` keyword
+  (mirroring `final_stmt`'s existing `opt(preceded(ws1, tag(&b"state"[..])))`) inserted before the
+  target-name parse in both `then_stmt_inner` and `transition_tail`, filed upstream against
+  `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).

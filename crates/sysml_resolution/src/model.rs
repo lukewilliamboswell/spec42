@@ -937,16 +937,24 @@ enum ReferenceKind {
     TransitionTarget,
     /// The authored shorthand `accept` trigger of a `transition ...;` body element
     /// (`TransitionAccept::Shorthand`'s expression, when it is a simple/qualified name), resolved
-    /// through the same `DeclarationDomain::Any` lexical lookup as `TransitionSource`. The typed
-    /// `TransitionAccept::Payload` form (an inline declared parameter, not a reference) and the
-    /// `TransitionAccept::TimeTrigger` form are out of scope.
+    /// through the same `DeclarationDomain::Any` lexical lookup as `TransitionSource`. The
+    /// `TransitionAccept::TimeTrigger` form instead reuses `lower_constraint_expression`'s own
+    /// dispatch (see `lower_transition`/`lower_then_accept`). The typed `TransitionAccept::Payload`
+    /// form is a genuinely different shape (an inline declared parameter, not a bare reference) and
+    /// does not use this kind at all -- it resolves through `AcceptPayloadType`/`AcceptVia` instead
+    /// (`lower_payload_clause_type`).
     TransitionTrigger,
-    /// The authored `do` effect target of a `transition ...;` body element -- either
+    /// The authored `do` effect operand of a `transition ...;` body element -- either
     /// `TransitionEffect::Perform`'s typed `type_name` (a structured `QualifiedReferenceId`,
-    /// resolved the same way `EntryActionBinding` resolves `EntryAction.action_reference`) or a
+    /// resolved the same way `EntryActionBinding` resolves `EntryAction.action_reference`), or a
     /// simple/qualified-name `TransitionEffect::Expression` (resolved the same way
-    /// `TransitionSource` resolves `Transition.source`). The richer `Accept`/`Send`/`Assign`
-    /// effect shapes are out of scope.
+    /// `TransitionSource` resolves `Transition.source`). The `Accept`/`Send`/`Assign` effect
+    /// shapes' `payload`/`lhs`/`rhs` operand(s) instead go through `lower_constraint_expression`'s
+    /// general dispatch (mirroring `lower_accept_send_clauses`'s `SendPayload::Expression` arm; see
+    /// `lower_transition_effect`), so a `FeatureRef`/`MemberAccess` within them resolves as
+    /// `ExpressionOperand`, not this kind. `Accept`/`Send`'s own optional `: Type` suffix resolves
+    /// through `AcceptPayloadType`, and their `via`/`to` clauses through `AcceptVia`/`SendTarget`,
+    /// same as a standalone `ActionUsage`'s accept/send suffix.
     TransitionEffect,
     /// The authored target metadata definition of an `@Name{...}`/`@Name;` metadata annotation
     /// (BNF MetadataUsage's `@`-prefixed body-element form, `ast::MetadataAnnotation`) applied to
@@ -6517,7 +6525,7 @@ impl SemanticModelBuilder {
                 )?;
             }
             ThenTarget::Accept(accept) => {
-                self.lower_then_accept(document, owner, family, accept)?;
+                self.lower_then_accept(document, owner, family, &accept.value)?;
             }
         }
         Ok(())
@@ -6710,15 +6718,18 @@ impl SemanticModelBuilder {
     /// `Invocation`/`Constructor` dispatch, e.g. `accept at new Time::Iso8601DateTime(...)`'s
     /// constructor callee/argument); `Payload`'s typed `: Type` suffix reuses
     /// `lower_payload_clause_type`. Either shape's optional trailing `via <port>` clause resolves
-    /// as an `AcceptVia` reference through `lower_satisfy_operand`.
+    /// as an `AcceptVia` reference through `lower_satisfy_operand`. Takes `&TransitionAccept`
+    /// rather than `&Node<TransitionAccept>` -- the outer span is never consulted here (each
+    /// sub-shape carries its own span data) -- so `Transition.accept` (`Option<TransitionAccept>`,
+    /// no `Node` wrapper) can share this same dispatch (see `lower_transition`).
     fn lower_then_accept(
         &mut self,
         document: DocumentId,
         owner: DeclarationId,
         family: UnsupportedFamily,
-        accept: &Node<TransitionAccept>,
+        accept: &TransitionAccept,
     ) -> Result<(), ConstructionError> {
-        match &accept.value {
+        match accept {
             TransitionAccept::Shorthand(expr, via) => {
                 self.lower_constraint_expression(document, owner, family, expr)?;
                 if let Some(via) = via {
@@ -7748,46 +7759,166 @@ impl SemanticModelBuilder {
                     expression,
                 )?;
             }
-            Some(TransitionAccept::Payload(_, _)) => {
-                self.push_unsupported(
-                    document,
-                    UnsupportedFamily::StateDefinitionMember,
-                    node.span.clone(),
-                );
+            // Mirrors `lower_then_accept`'s own `Payload` arm exactly (not delegated wholesale --
+            // `Shorthand`/`TimeTrigger` above intentionally keep this function's own narrower
+            // `lower_transition_end`/`TransitionTrigger` dispatch rather than `lower_then_accept`'s
+            // broader `lower_constraint_expression` one, a pre-existing divergence between the two
+            // call sites this fix does not change). Previously always unconditionally unsupported
+            // even though `lower_payload_clause_type` (`AcceptPayloadType`) already exists and
+            // already resolves the identical shape for `ThenTarget::Accept` -- a sibling-wiring gap
+            // (found auditing `unsupported_state_definition_member`, e.g. `sysml.library/
+            // actions.md`'s `accept apayload: Anything via receiver`).
+            Some(TransitionAccept::Payload(clause, via)) => {
+                self.lower_payload_clause_type(document, declaration, clause)?;
+                if let Some(via) = via {
+                    self.lower_satisfy_operand(
+                        document,
+                        declaration,
+                        UnsupportedFamily::StateDefinitionMember,
+                        ReferenceKind::AcceptVia,
+                        via,
+                    )?;
+                }
             }
         }
-        match &node.value.effect {
-            None => {}
-            Some(TransitionEffect::Perform {
+        if let Some(effect) = &node.value.effect {
+            self.lower_transition_effect(
+                document,
+                declaration,
+                UnsupportedFamily::StateDefinitionMember,
+                effect,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Lowers a `Transition.effect` (BNF `TransitionUsage`'s `do` clause, `ast::TransitionEffect`)
+    /// found on a `transition ...;`/shorthand `accept ... do ... then ...;` body element. Dispatches
+    /// on all five shapes:
+    /// - `Perform { type_name: Some(_), .. }` (`do action powerUp : PowerUp;`) resolves the typed
+    ///   target as a `TransitionEffect` reference, same as `EntryActionBinding`/`DoActionBinding`.
+    /// - `Perform { type_name: None, .. }` (`do action D;`, no `: Type`) has nothing left to
+    ///   resolve -- `name` is a declared label for a new anonymous nested action usage
+    ///   (`PerformActionUsageDeclaration`'s bare `UsageDeclaration` form), not a reference, so this
+    ///   is a genuine no-op, not an unsupported construct (found auditing
+    ///   `unsupported_state_definition_member`: this shape was previously always flagged
+    ///   unsupported even though it carries no resolvable data, over-flagging a fully-understood
+    ///   construct the same way the prior pass's bare `entry`/`do`/`exit` fix did).
+    /// - `Expression` reuses `lower_transition_end`'s narrower `FeatureRef`/`MemberAccess`
+    ///   dispatch, unchanged from before this pass.
+    /// - `Accept`/`Send`/`Assign` (the "richer effect shapes" the `TransitionEffect` `ReferenceKind`
+    ///   doc previously called out of scope) are new this pass: each already carries a fully typed
+    ///   `Node<Expression>` payload/lhs/rhs plus optional `via`/`to`/`type_name`, so they reuse the
+    ///   exact same building blocks `lower_accept_send_clauses` (a standalone `ActionUsage`'s
+    ///   accept/send suffix) already established -- `lower_constraint_expression`'s general
+    ///   dispatch (literals, `FeatureRef`/`MemberAccess` as `expressionOperand`, arithmetic/
+    ///   comparison `BinaryOp`, `Invocation`/`Constructor` callee+args) for the payload/lhs/rhs
+    ///   operands, exactly mirroring `lower_accept_send_clauses`'s own `SendPayload::Expression`
+    ///   arm (picking up e.g. `do send new Deliver(pub.publication) to ...`'s constructor callee/
+    ///   argument, or `do assign counter.count := counter.count + 1;`'s arithmetic `rhs` --
+    ///   `lower_satisfy_operand`'s narrower reference-only dispatch would wrongly flag a literal or
+    ///   arithmetic operand as unsupported), `push_action_binding_reference` for the optional
+    ///   `: Type` suffix (mirroring `lower_payload_clause_type`, but `Accept`/`Send`'s `type_name`
+    ///   is a bare `QualifiedReferenceId` rather than a `PayloadClause`), and `AcceptVia`/
+    ///   `SendTarget` for the optional `via`/`to` clauses (same `ReferenceKind`s
+    ///   `lower_accept_send_clauses` uses, still reference-only -- a port/receiver operand, unlike
+    ///   the payload/value operands, is never a literal or arithmetic expression in practice).
+    ///   `Assign`'s `lhs`/`rhs` share the same `lower_constraint_expression` dispatch, both sourced
+    ///   at `owner`; any `FeatureRef`/`MemberAccess` within either resolves as `expressionOperand`
+    ///   (there is no dedicated assign-target/assign-value `ReferenceKind` pair the way `Bind`/
+    ///   `Allocate` have `Source`/`Target`, since an assignment's `lhs` is not a separately-typed
+    ///   relationship the rest of the schema tracks).
+    fn lower_transition_effect(
+        &mut self,
+        document: DocumentId,
+        owner: DeclarationId,
+        family: UnsupportedFamily,
+        effect: &TransitionEffect,
+    ) -> Result<(), ConstructionError> {
+        match effect {
+            TransitionEffect::Perform {
                 type_name: Some(type_name),
                 ..
-            }) => {
+            } => {
                 self.push_action_binding_reference(
                     document,
-                    declaration,
+                    owner,
                     ReferenceKind::TransitionEffect,
                     *type_name,
                 )?;
             }
-            Some(TransitionEffect::Expression(expression)) => {
+            TransitionEffect::Perform {
+                type_name: None, ..
+            } => {}
+            TransitionEffect::Expression(expression) => {
                 self.lower_transition_end(
                     document,
-                    declaration,
+                    owner,
                     ReferenceKind::TransitionEffect,
                     expression,
                 )?;
             }
-            Some(TransitionEffect::Perform {
-                type_name: None, ..
-            })
-            | Some(TransitionEffect::Accept { .. })
-            | Some(TransitionEffect::Send { .. })
-            | Some(TransitionEffect::Assign { .. }) => {
-                self.push_unsupported(
-                    document,
-                    UnsupportedFamily::StateDefinitionMember,
-                    node.span.clone(),
-                );
+            TransitionEffect::Accept {
+                payload,
+                type_name,
+                via,
+            } => {
+                self.lower_constraint_expression(document, owner, family, payload)?;
+                if let Some(type_name) = type_name {
+                    self.push_action_binding_reference(
+                        document,
+                        owner,
+                        ReferenceKind::AcceptPayloadType,
+                        *type_name,
+                    )?;
+                }
+                if let Some(via) = via {
+                    self.lower_satisfy_operand(
+                        document,
+                        owner,
+                        family,
+                        ReferenceKind::AcceptVia,
+                        via,
+                    )?;
+                }
+            }
+            TransitionEffect::Send {
+                payload,
+                type_name,
+                via,
+                to,
+            } => {
+                self.lower_constraint_expression(document, owner, family, payload)?;
+                if let Some(type_name) = type_name {
+                    self.push_action_binding_reference(
+                        document,
+                        owner,
+                        ReferenceKind::AcceptPayloadType,
+                        *type_name,
+                    )?;
+                }
+                if let Some(via) = via {
+                    self.lower_satisfy_operand(
+                        document,
+                        owner,
+                        family,
+                        ReferenceKind::AcceptVia,
+                        via,
+                    )?;
+                }
+                if let Some(to) = to {
+                    self.lower_satisfy_operand(
+                        document,
+                        owner,
+                        family,
+                        ReferenceKind::SendTarget,
+                        to,
+                    )?;
+                }
+            }
+            TransitionEffect::Assign { lhs, rhs } => {
+                self.lower_constraint_expression(document, owner, family, lhs)?;
+                self.lower_constraint_expression(document, owner, family, rhs)?;
             }
         }
         Ok(())
