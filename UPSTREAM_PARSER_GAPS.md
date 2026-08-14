@@ -252,6 +252,18 @@ entry should carry enough detail to file/update an upstream issue against
   `RELATIONSHIP_BODY_STARTERS` in `src/parser/lex.rs:170`, `METADATA_BODY_STARTERS` in
   `src/parser/attribute.rs:69-80`) still has no bare-name-shorthand arm; the fixtures above still
   report `unrecognized_declaration_in_scope`.
+  **Update (exhaustive `unsupported_constraint_definition_member` audit, this pass):** the same
+  root cause -- no bare-name production reachable outside `attribute_body_element` -- also blocks
+  `constraint_def_body_element` (`src/parser/constraint.rs:159-200`, no bare-name arm and not one of
+  the scopes named above), confirmed via a direct `sysml_v2_parser_next::parse_for_editor_owned`
+  probe against `test/snapshots/sysml/examples/constraint_test.md`'s `constraint massLimitation {
+  mass : MassValue; massLimit : MassValue; mass < massLimit }`: the bare `mass : MassValue;`/
+  `massLimit : MassValue;` members (no leading keyword) each fragment into a spurious
+  `Expression(FeatureRef(<name>))` plus an `Other(": MassValue;...")` tail, exactly like the
+  package/relationship/metadata cases above (2 of the 57 occurrences in that audit). Unlike Gap 55
+  (also found by that audit), there is no already-working bare-name production anywhere in the
+  codebase for `constraint_def_body_element` to call -- this is the same genuinely-unimplemented
+  shorthand as the rest of this gap, one more scope added to the blocked list.
 
 - Gap 24. Two additional single-file constructs share the same `unrecognized_declaration_in_scope`
   mechanism but are too narrow to merit their own numbered upstream issue on their own; recorded
@@ -491,6 +503,27 @@ entry should carry enough detail to file/update an upstream issue against
   `IncludeUseCaseUsage`-shaped node for (c)) or widened parser productions accepting the fuller
   spellings, filed upstream against the same `feat/gh-119-arena-backed-references`
   (elan8/sysml-v2-parser#121).
+  **Update (exhaustive `unsupported_constraint_definition_member` audit, this pass):** the same
+  `UseCaseDefBodyElement` (`src/ast/requirement.rs:604-646`) narrowness generalizes to a fourth
+  shape found while tracing a case-family-body occurrence of the constraint diagnostic family:
+  there is no `RequireConstraint`/`AssumeConstraint` variant at all, so the `require constraint {
+  ... }`/`assume constraint <name> { ... }` shape Gap 29's update already wired up for
+  `RequirementDefBodyElement::RequireConstraint` (`lower_require_constraint_member`,
+  `crates/sysml_resolution/src/model.rs`) has nothing to dispatch from when the identical
+  `require constraint { ... }` statement appears directly inside an `analysis def`/`use case def`/
+  `case def`/`verification def` body instead of a `requirement def` body. Confirmed via a direct
+  `sysml_v2_parser_next::parse_for_editor_owned` probe: `use_case_def_body_element`'s alternative
+  list (`src/parser/usecase.rs:520-602`) has no `require`/`assume` keyword check anywhere (`grep -n
+  '"require"' src/parser/usecase.rs` finds no hits), so
+  `test/snapshots/sysml/training/33_analysis_case_definition_example.md`'s `analysis def ... {
+  require constraint { fuelEconomyResult > 30 [mi / gal] } }` (1 occurrence) fragments the same way
+  as every other shape in this gap -- `require`/`constraint` each become a spurious
+  `Expression(FeatureRef(...))`, and the braced body becomes a whole-statement
+  `UseCaseDefBodyElement::Other`. Needs a `RequireConstraint(Node<RequireConstraint>)` variant added
+  to `UseCaseDefBodyElement` (reusing the existing `RequireConstraint`/`RequireConstraintBody` typed
+  AST Gap 29 already covers) with `use_case_def_body_element` taught to dispatch `require`/`assume`
+  to it, mirroring `RequirementDefBodyElement`'s existing wiring, filed upstream against the same
+  `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
 
 - Gap 35. `SubjectDecl` (`src/ast/requirement.rs:118-123`) has no `redefines` field and its parser
   production, `subject_decl_inner` (`src/parser/requirement.rs:482-558`), only recognizes a
@@ -1272,3 +1305,119 @@ found; all 51 fixtures are genuine upstream parser gaps**, grouped into Gaps 15-
   (mirroring `final_stmt`'s existing `opt(preceded(ws1, tag(&b"state"[..])))`) inserted before the
   target-name parse in both `then_stmt_inner` and `transition_tail`, filed upstream against
   `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
+
+- Gap 55. `constraint_def_body_element` (`src/parser/constraint.rs:159-200`) never tries the
+  `attribute`, `return`, or bare-keyword `redefines`/`subsets` productions at all, even though all
+  three already exist and are dispatched successfully by the sibling `calc_def_body_element`
+  (`src/parser/constraint.rs:1143-...`, `attribute` arm at `:1189-1193`) for the *identical*
+  member shapes inside a `calc def`/`calc` usage body. Found exhaustively auditing
+  `unsupported_constraint_definition_member` (57 occurrences across the non-parser-grammar-blocked
+  corpus, this pass, against `cb026cd`): `constraint_def_body_element`'s `alt`-style dispatch only
+  recognizes `doc`, `@`, `in`/`out`/`inout`, `constraint`, and a *symbol*-prefixed `:>>`/`:>` (mapped
+  to `redefinition_feature_binding`, `ConstraintDefBodyElement::AttributeUsage`) before falling to a
+  bare `expression` catch-all; `CONSTRAINT_DEF_BODY_STARTERS` (`src/parser/lex.rs:156-165`) has no
+  `attribute`/`return`/`redefines` entries either (contrast `CALC_DEF_BODY_STARTERS`,
+  `src/parser/lex.rs:152-154`, which has `return` -- though notably not `attribute`/`redefines`
+  either; `calc_def_body_element` reaches `attribute_usage` via an unconditional keyword check ahead
+  of the starters table, at line 1189, independent of that table). Verified via a direct
+  `sysml_v2_parser_next::parse_for_editor_owned` AST-dump probe (temporary
+  `crates/sysml_resolution/examples/dump_constraint_ast*.rs`, removed after use) that each of the
+  three shapes below fragments identically: the leading keyword itself becomes a spurious
+  `ConstraintDefBodyElement::Expression(FeatureRef("attribute"))`/`Expression(FeatureRef("return"))`/
+  `Expression(FeatureRef("redefines"))` (each separately resolved as an unresolved lexical reference,
+  explaining the adjacent `unresolved_reference` diagnostics seen in the snapshots), the declared
+  name becomes a second spurious `Expression(FeatureRef(<name>))`, and the remaining `: Type ...;`/
+  `= value { ... };` tail becomes a whole-statement `ConstraintDefBodyElement::Other` fallback:
+  (a) **`attribute <name> [: Type] [= value];`** (no `:>>`/`:>` prefix) -- the large majority (51 of
+  57) of this audit's occurrences, e.g. `test/snapshots/sysml/examples/hsuvdynamics.md`'s
+  `constraint def PowerEquation { attribute whlpwr : Horsepwr; ... }` (39 occurrences alone) and
+  `test/snapshots/sysml/examples/constraint_test.md`'s `attribute totalMass: MassValue;`/`attribute
+  redefines totalMass = mass;` (the `attribute redefines ...` spelling also blocked here, since the
+  `attribute` keyword itself is never tried); `attribute_usage` (`src/parser/attribute.rs:743`)
+  already parses every one of these shapes correctly when reached from a `calc`/`part`/`item` body.
+  (b) **`return <name> = <value> [{ ... }];`** (`test/snapshots/sysml.library/requirements.md`'s
+  `return result = allTrue(assumptions()) implies allTrue(constraints()) { doc /* ... */ }`, 1
+  occurrence) -- `return_decl`/`return_expression_stmt` (`src/parser/constraint.rs:1456`/`:1425`)
+  already parse this shape correctly when reached from `calc_def_body_element`'s own `return` arm
+  (`:1288-1301`).
+  (c) **bare-keyword `redefines <target> = <value>;`/`subsets <target> = <value>;`** (no `:>>`/`:>`
+  symbol at all, e.g. `test/snapshots/sysml/training/31_constraints_example_2.md`'s `constraint
+  massConstraint : MassConstraint { redefines partMasses = (...); redefines massLimit = 2500[kg]; }`,
+  4 occurrences) -- this is the narrowest and most surgical instance of the three:
+  `redefinition_feature_binding` (`src/parser/attribute.rs:563-577`), the exact function
+  `constraint_def_body_element` already calls for the symbol-prefixed `:>>`/`:>` case, *already*
+  special-cases the bare keyword spelling internally (`src/parser/attribute.rs:567-570`, comment
+  "GH-92.1: bare `redefines <target> = <value>;` (the literal keyword, not just the `:>>` symbol)")
+  -- but `constraint_def_body_element`'s own dispatch condition
+  (`input.fragment().starts_with(b":>>") || input.fragment().starts_with(b":>")`,
+  `src/parser/constraint.rs:189`) never routes to it unless the symbol is present, so the keyword
+  spelling never reaches a function that already knows how to parse it. Needs (a)/(b) new keyword
+  dispatch arms added to `constraint_def_body_element` calling the existing `attribute_usage`/
+  `return_decl`/`return_expression_stmt` productions (mirroring `calc_def_body_element`'s own arms),
+  and (c) `constraint_def_body_element`'s `:189` condition widened to
+  `|| starts_with_keyword(input.fragment(), b"redefines") || starts_with_keyword(input.fragment(),
+  b"subsets")` (a one-line fix, since `redefinition_feature_binding` itself already handles the rest),
+  filed upstream against `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121). Note this
+  is a different gap shape from Gap 42's `StateDefBodyElement`/`RequirementDefBodyElement`
+  "usage-member zoo" pattern: `ConstraintDefBodyElement` itself is *not* missing a variant for any of
+  these three shapes (`AttributeUsage`/`Expression` already exist and would carry them fine) -- the
+  narrowness is entirely in `constraint_def_body_element`'s own keyword dispatch, one level below the
+  enum, the same class of gap as Gaps 15/18/19/20/21/24's missing-starter-table entries.
+
+- Gap 56. `CollectionOperatorBody` (`src/ast/core.rs:364-369`, the brace body of a `->forAll{}`/
+  `->exists{}`/collection-operator closure, also reused standalone as KerML's `BodyExpr`) has no
+  support for local declaration statements ahead of its final result expression -- its `result`
+  field is a single `Option<Box<Node<Expression>>>`, not a statement sequence. Found auditing
+  `unsupported_constraint_definition_member`: `collection_operator_body`
+  (`src/parser/expr.rs:540-581`) loops consuming only `in`/`out`/`inout`-prefixed
+  `CollectionOperatorParameter`s (`:545-558`), then parses exactly one trailing `expression` as
+  `result` (`:559-565`) -- there is no alternative for a `private <name> [: Type] = <value>;`-style
+  local variable declaration appearing between the parameters and the result. Confirmed via a direct
+  `sysml_v2_parser_next::parse_for_editor_owned` probe: `(1..3)->forAll {in i: Integer; i > 0}`
+  parses cleanly to `Expression::CollectionOp` with a populated `CollectionOperatorBody`, but
+  `(1..3)->forAll {in i: Integer; private thisSample : Integer = i; thisSample > 0}` (identical
+  shape plus one local declaration) fails outright once `expression(next)` is asked to parse
+  `private thisSample : Integer = i; thisSample > 0` as a single expression and cannot -- the whole
+  closure, and the entire enclosing `assert constraint`/`constraint` statement around it, falls to
+  `Other`/whole-statement recovery. Confirmed blocking
+  `test/snapshots/sysml/examples/vehicle_analysis_demo.md`'s `assert constraint
+  straightLineDynamics { (1..sc.n-1)->forAll {in i: Integer; private thisSample : ... = sc.samples#
+  (i); private nextSample : ... = sc.samples#(i+1); StraightLineDynamicsEquations(...) } }` and
+  `test/snapshots/sysml/examples/vehicle_geometry_and_coordinate_frames.md`'s `assert constraint {
+  (1..numberOfBolts)->forAll { in i : Natural; private attribute lbcf = ...; private attribute trs :
+  TranslationRotationSequence { :>> source = wcf; ... } lbcf.transformation == trs } }` (2
+  occurrences total). This is a genuine typed-AST inadequacy, not a dispatch-table gap like Gap 55:
+  even with a fix to *reach* `collection_operator_body`, there is no field to hold a sequence of
+  local declarations ahead of the result. Needs `CollectionOperatorBody.result` widened to a
+  statement sequence (or a new `statements: Vec<Node<...>>` field added alongside it, mirroring how
+  `ActionUsageBody`/`CalcDefBody` hold heterogeneous member sequences) and
+  `collection_operator_body`'s loop taught to also recognize local-declaration starters, filed
+  upstream against `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121).
+
+- Gap 57. `CollectionOperatorParameter.direction` (`src/ast/core.rs:376`) is a mandatory
+  `Node<InOut>`, not `Option<Node<InOut>>`, so a collection-operator closure parameter written
+  without an explicit `in`/`out`/`inout` keyword -- a spelling that appears in the real corpus
+  alongside the keyword-prefixed form -- cannot parse as a parameter at all. Found auditing
+  `unsupported_constraint_definition_member`: `collection_operator_parameter`
+  (`src/parser/expr.rs:476-530`) requires one of `alt((inout, in, out))` (`:481-488`) before the
+  parameter name with no bare-name alternative, and `collection_operator_body`'s own loop
+  (`src/parser/expr.rs:547-550`) only *attempts* `collection_operator_parameter` when the next
+  token is already `in`/`out`/`inout` -- so a bare `p2 : Point;` parameter is never even offered to
+  `collection_operator_parameter`; the loop exits immediately and `p2 : Point; p1 != p2 and ...`
+  is handed to the single-expression `result` parse instead, which fails on the embedded `;`.
+  Confirmed via a direct `sysml_v2_parser_next::parse_for_editor_owned` probe:
+  `vertices->exists{in p2 : Point; p1 != p2}` (parameter prefixed with `in`) parses cleanly to
+  `Expression::CollectionOp`, while the byte-identical `vertices->exists{p2 : Point; p1 != p2}`
+  (no `in`) falls to `Other`. Confirmed blocking
+  `test/snapshots/sysml.library/shape_items.md`'s `assert constraint { isClosed ==
+  vertices->forAll{in p1 : Point; vertices->exists{p2 : Point; p1 != p2 and
+  includes(p1.matingOccurrences, p2)}}}` (1 occurrence; the outer `forAll`'s `in p1 : Point;`
+  parameter is fine, only the inner `exists{p2 : Point; ...}`'s bare parameter breaks the whole
+  outer closure, since parse failure anywhere inside a `CollectionOperatorBody` fails the entire
+  enclosing expression). Needs `CollectionOperatorParameter.direction` widened to
+  `Option<Node<InOut>>` and `collection_operator_body`'s loop condition taught to also try
+  `collection_operator_parameter` when the next token is a bare `name :`/`name ;`-shaped parameter
+  (not just when prefixed by a direction keyword), filed upstream against
+  `feat/gh-119-arena-backed-references` (elan8/sysml-v2-parser#121). Closely related to Gap 56
+  (same `collection_operator_body`/`CollectionOperatorParameter` productions) but a distinct root
+  cause -- fixing one does not fix the other.
